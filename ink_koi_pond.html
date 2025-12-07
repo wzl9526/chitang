@@ -1,0 +1,298 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Ink Koi Pond 🐟</title>
+    <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@500&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #eef2f3; /* 浅灰白底 */
+            /* 叠加宣纸纹理 */
+            background-image: url('https://www.transparenttextures.com/patterns/rice-paper-2.png');
+            font-family: 'Noto Serif SC', serif;
+        }
+        canvas { display: block; }
+        .poem {
+            position: absolute;
+            top: 10%;
+            left: 10%;
+            writing-mode: vertical-rl; /* 竖排 */
+            font-family: 'Ma Shan Zheng', cursive;
+            font-size: 28px;
+            color: #2c3e50;
+            opacity: 0.8;
+            pointer-events: none;
+            line-height: 50px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        }
+        .instruction {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: #888;
+            font-size: 14px;
+            pointer-events: none;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="poem">
+        江南可采莲<br>莲叶何田田<br>鱼戏莲叶间<br>鱼戏莲叶东<br>鱼戏莲叶西
+    </div>
+    <canvas id="canvas"></canvas>
+    <div class="instruction">- 移动鼠标喂食锦鲤 · Click to Ripple -</div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height;
+        let mouse = { x: 0, y: 0 };
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initPond();
+        }
+        window.addEventListener('resize', resize);
+        window.addEventListener('mousemove', e => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+            // 鼠标移动产生细微波纹
+            if(Math.random() > 0.8) ripples.push(new Ripple(mouse.x, mouse.y, 1));
+        });
+        window.addEventListener('click', e => {
+            ripples.push(new Ripple(e.clientX, e.clientY, 3));
+        });
+
+        // --- 基础向量类 (用于生物运动计算) ---
+        class Vector {
+            constructor(x, y) { this.x = x; this.y = y; }
+            add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+            sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+            mult(n) { return new Vector(this.x * n, this.y * n); }
+            mag() { return Math.sqrt(this.x*this.x + this.y*this.y); }
+            normalize() {
+                let m = this.mag();
+                return m === 0 ? new Vector(0,0) : new Vector(this.x/m, this.y/m);
+            }
+        }
+
+        // --- 类定义 ---
+
+        // 1. 涟漪 (Ripple)
+        class Ripple {
+            constructor(x, y, power) {
+                this.x = x; this.y = y;
+                this.r = 1;
+                this.opacity = 0.5 * power;
+                this.power = power;
+            }
+            update() {
+                this.r += 2;
+                this.opacity -= 0.01;
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
+                ctx.strokeStyle = `rgba(100, 149, 237, ${this.opacity})`;
+                ctx.lineWidth = 1 + this.power;
+                ctx.stroke();
+            }
+        }
+
+        // 2. 荷叶 (Lotus Leaf) - 静态背景生成
+        class Lotus {
+            constructor() {
+                this.x = Math.random() * width;
+                this.y = Math.random() * height;
+                this.size = Math.random() * 60 + 40;
+                this.color = `rgba(47, 79, 79, ${Math.random()*0.3 + 0.5})`; // 墨绿色
+                this.angle = Math.random() * Math.PI * 2;
+                // 缺口角度
+                this.gapAngle = this.angle + Math.PI; 
+            }
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // 画叶子 (带缺口的圆)
+                ctx.beginPath();
+                ctx.arc(0, 0, this.size, 0.1, Math.PI * 1.9); // 留个缺口
+                ctx.lineTo(0, 0); // 连回中心
+                ctx.fillStyle = this.color;
+                ctx.fill();
+
+                // 画叶脉
+                ctx.strokeStyle = "rgba(0,0,0,0.1)";
+                ctx.lineWidth = 1;
+                for(let i=0; i<8; i++) {
+                    ctx.beginPath();
+                    ctx.moveTo(0,0);
+                    ctx.lineTo(Math.cos(i*Math.PI/4)*this.size, Math.sin(i*Math.PI/4)*this.size);
+                    ctx.stroke();
+                }
+                ctx.restore();
+            }
+        }
+
+        // 3. 锦鲤 (Koi Fish) - 核心难点
+        class Koi {
+            constructor() {
+                this.pos = new Vector(Math.random()*width, Math.random()*height);
+                this.vel = new Vector(Math.random()-0.5, Math.random()-0.5);
+                this.acc = new Vector(0,0);
+                this.maxSpeed = 2 + Math.random();
+                this.maxForce = 0.05;
+
+                // 身体分段 (脊柱)
+                this.history = []; 
+                this.len = 15; // 身体长度
+                for(let i=0; i<this.len; i++) {
+                    this.history.push(this.pos);
+                }
+
+                // 颜色 (红白 或 金色)
+                this.type = Math.random() > 0.5 ? 'red' : 'gold';
+            }
+
+            // 追逐鼠标
+            seek(target) {
+                let desired = new Vector(target.x, target.y).sub(this.pos);
+                let d = desired.mag();
+                desired = desired.normalize();
+
+                if (d < 100) { // 靠近时减速
+                    desired = desired.mult(this.maxSpeed * (d/100));
+                } else {
+                    desired = desired.mult(this.maxSpeed);
+                }
+
+                let steer = desired.sub(this.vel);
+                // 限制转向力
+                let m = steer.mag();
+                if(m > this.maxForce) steer = steer.normalize().mult(this.maxForce);
+
+                this.acc = this.acc.add(steer);
+            }
+
+            update() {
+                // 1. 物理运动
+                this.seek(mouse); // 总是被鼠标吸引
+                this.vel = this.vel.add(this.acc);
+                // 限制速度
+                let s = this.vel.mag();
+                if(s > this.maxSpeed) this.vel = this.vel.normalize().mult(this.maxSpeed);
+
+                this.pos = this.pos.add(this.vel);
+                this.acc = new Vector(0,0); // 重置加速度
+
+                // 2. 更新脊柱 (身体跟随头部)
+                this.history.unshift(this.pos);
+                this.history.pop();
+            }
+
+            draw() {
+                // 身体半径随位置变化 (头大尾小)
+                const getRadius = (i) => {
+                    if (i < 3) return 8 + i; // 头部渐宽
+                    return 12 - i * 0.8; // 身体渐细
+                };
+
+                // 绘制身体 (连接圆)
+                for (let i = 0; i < this.history.length; i++) {
+                    let p = this.history[i];
+                    let r = getRadius(i);
+                    if (r < 0) r = 1;
+
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+
+                    // 颜色处理：水墨风带一点色彩
+                    if (this.type === 'red') {
+                        // 头部红色，尾部白色渐变
+                        ctx.fillStyle = i < 5 ? "rgba(220, 20, 60, 0.8)" : "rgba(240, 240, 240, 0.6)"; 
+                    } else {
+                        // 金色
+                        ctx.fillStyle = i < 5 ? "rgba(218, 165, 32, 0.8)" : "rgba(255, 255, 224, 0.6)";
+                    }
+
+                    // 给身体加一点墨边
+                    ctx.shadowBlur = 2;
+                    ctx.shadowColor = "rgba(0,0,0,0.2)";
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+
+                // 简单的鱼鳍 (在第4节身体处画)
+                if(this.history[3]) {
+                    let p = this.history[3];
+                    // 计算身体方向
+                    let angle = Math.atan2(this.vel.y, this.vel.x);
+                    ctx.save();
+                    ctx.translate(p.x, p.y);
+                    ctx.rotate(angle);
+
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+                    // 左鳍
+                    ctx.beginPath(); ctx.ellipse(5, -10, 8, 3, Math.PI/4, 0, Math.PI*2); ctx.fill();
+                    // 右鳍
+                    ctx.beginPath(); ctx.ellipse(5, 10, 8, 3, -Math.PI/4, 0, Math.PI*2); ctx.fill();
+                    ctx.restore();
+                }
+            }
+        }
+
+        // --- 主程序 ---
+        const ripples = [];
+        const lotuses = [];
+        const fishSchool = [];
+
+        function initPond() {
+            mouse.x = width / 2;
+            mouse.y = height / 2;
+
+            lotuses.length = 0;
+            fishSchool.length = 0;
+
+            // 生成荷叶
+            for(let i=0; i<12; i++) lotuses.push(new Lotus());
+
+            // 生成锦鲤群
+            for(let i=0; i<8; i++) fishSchool.push(new Koi());
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, width, height);
+
+            // 1. 画荷叶 (底层)
+            lotuses.forEach(l => l.draw());
+
+            // 2. 画涟漪
+            for (let i = ripples.length - 1; i >= 0; i--) {
+                let r = ripples[i];
+                r.update();
+                r.draw();
+                if (r.opacity <= 0) ripples.splice(i, 1);
+            }
+
+            // 3. 画鱼
+            fishSchool.forEach(fish => {
+                fish.update();
+                fish.draw();
+            });
+
+            requestAnimationFrame(animate);
+        }
+
+        resize();
+        animate();
+
+    </script>
+</body>
+</html>
